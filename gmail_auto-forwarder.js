@@ -4,6 +4,7 @@
 // • 'setTrigger': Install a trigger for this script.                //
 // • 'unsetTrigger': Uninstall all trigger kinds of this script.     //
 // DO NOT RUN THESE FUNCTIONS MANUALLY. RUN THEM AT YOUR OWN RISK!!! //
+// • 'waitExecution'                                                 //
 // • 'waitPager'                                                     //
 // • 'threadsPager'                                                  //
 // • 'forwarder'                                                     //
@@ -47,10 +48,23 @@ var DEBUG = false
 // DEFAULT: false
 var TRIAL = false
 
+////////////////////////////
+// ADVANCED CONFIGURATION //
+////////////////////////////
+
+// Set 'true' in the first element to use an alias address and set '0' in the last element to use the first registered alias address
+// DEFAULT: [false, 0]
+var ALIAS = [false, 0]
+
+// Set 'true' in the first element to wait for the running execution to end first, then in the last element, set this project Google Apps Script ID in the string format
+// CAUTION: Configure the step 5 installation on README.md is required
+// DEFAULT: [false, 'JjW34wcx7rTbwNCEPojdJ-THIS_IS_A_DUMMY_ID-BXSI69WdbS9rapVo']
+var EXEC_WAIT = [false, 'JjW34wcx7rTbwNCEPojdJ-THIS_IS_A_DUMMY_ID-BXSI69WdbS9rapVo']
+
 //////////////////////////////////////////////////////////////////
 // AUTHOR  : ADE DESTRIANTO                                     //
 // TITLE   : GMAIL AUTO-FORWARDER                               //
-// VERSION : 1.2 BUILD 20240329                                 //
+// VERSION : 1.3 BUILD 20240624                                 //
 // GITHUB  : https://github.com/destrianto/gmail_auto-forwarder //
 //////////////////////////////////////////////////////////////////
 
@@ -125,7 +139,7 @@ function unsetTrigger(trigger = 'unset'){
   var triggers = ScriptApp.getProjectTriggers()
   var handler = ['forwarder', 'forwarderPager', 'threadsPager']
   var found = 0
-  for(var i = 0; i < triggers.length; i++){
+  for(i = 0; i < triggers.length; i++){
     // Unset specified trigger
     if(trigger !== 'unset'){
       if(triggers[i].getHandlerFunction() === trigger){
@@ -134,7 +148,7 @@ function unsetTrigger(trigger = 'unset'){
     }
     // Unset all kinds of this script's trigger
     else{
-      for(var j = 0; j < handler.length; j++){
+      for(j = 0; j < handler.length; j++){
         if(triggers[i].getHandlerFunction() === handler[j]){
          ScriptApp.deleteTrigger(triggers[i])
          found++
@@ -153,10 +167,35 @@ function unsetTrigger(trigger = 'unset'){
   }
 }
 
+// Postpone new execution if the execution is still running
+function waitExecution(){
+  // Verify if the execution is still running via Google Script Apps's API
+  var apiGAS = UrlFetchApp.fetch('https://script.googleapis.com/v1/processes?userProcessFilter.functionName=forwarder&userProcessFilter.scriptId=' + EXEC_WAIT[1], {headers: {Authorization: 'Bearer ' + ScriptApp.getOAuthToken()}})
+  // Filter the Google Script Apps's API response to match execution is running
+  var responseGAS = JSON.parse(apiGAS).processes.filter(execution => {return execution.processType == 'TIME_DRIVEN' && execution.processStatus == 'RUNNING'})[0]
+  var executionStatus = Object.values(responseGAS || {}).includes('RUNNING')
+  // Ignore execution's duration less than the script's clock trigger
+  try{
+    var executionDuration = parseFloat(Object.values(responseGAS || {})[6].slice(0, -1)) > (CLOCK * 60)
+  }
+  // The execution is not running
+  catch(supress){
+    return false
+  }
+  // Postpone new execution according to Google Script Apps's API response result
+  if(executionStatus && executionDuration){
+    console.warn('POSTPONED: The execution is still running')
+    return true
+  }
+  else{
+    return false
+  }
+}
+
 // Postpone the new trigger if there's a paging trigger exists
 function waitPager(paging = false){
   var triggers = ScriptApp.getProjectTriggers()
-  for(var i = 0; i < triggers.length; i++){
+  for(i = 0; i < triggers.length; i++){
     if(triggers[i].getHandlerFunction() === 'forwarderPager'){
       // Remove the paging trigger if it's disabled and delay the new trigger
       if(triggers[i].isDisabled()){
@@ -204,73 +243,136 @@ function forwarderPager(){
 
 // Gmail Auto-forwarder
 function gmailAutoForwarder(paging, trial){
+  // If configured, wait for the running execution to end first
+  if(EXEC_WAIT[0]){
+    // Stop this execution at once if the execution is still running
+    if(waitExecution()){
+      return
+    }
+  }
   // Stop this execution at once if there's an active paging trigger
   if(!paging && waitPager()){
     return
   }
   else{
-    var count = []
+    var pages = []
     // Iterate the list of filters and recipients to perform forwarding
-    for(var i = 0; i < PASS.length; i++){
+    for(i = 0; i < PASS.length; i++){
       var job = '[Job ' + (i + 1) + ']'
-      var threads = GmailApp.search(PASS[i][0], 0, THREADS)
+      var inInbox = GmailApp.search('in:inbox ' + PASS[i][0], 0, THREADS)
       console.info('   QUERY_FOR: ' + job + ' ' + PASS[i][0])
       // Skip this one filter process due to no matching message(s) found
-      if(threads.length === 0){
+      if(inInbox.length === 0){
         console.info('        IDLE: ' + job + ' There are no message(s) that match the query')
-        count.push(false)
+        pages.push(false)
         continue
       }
       // Proceed to forward the matching message(s)
       else{
-        // Iterate the list of matching message(s)
-        for(var j = 0; j < threads.length; j++){
-          var inbox = threads[j].getMessages()
-          if(!trial){
-            var name = inbox[0].getFrom()
-            // Forward the matching message from the Inbox and delete it permanently
-            inbox[0].forward(PASS[i][1], {name: name, replyTo: name, subject: inbox[0].getSubject(), htmlBody: inbox[0].getBody()})
-            Gmail.Users.Messages.remove('me', inbox[0].getId())
-            // Debug to verify the job between the Inbox and Sent are in sequential sync
-            if(DEBUG){
-              console.warn('       DEBUG: ' + job + ' ### [Inbox] ### [Found: ' + (threads.length - j) + ' message(s)] ### [Forwarding & Deleting: 1 of ' + (threads.length - j) + ' message(s)] ### [Subject: \'' + inbox[0].getSubject() + '\']')
+        var messages = 0
+        // Iterate the list of matching thread(s)
+        for(j = 0; j < inInbox.length; j++){
+          var messageThread = inInbox[j].getMessages()
+          // Iterate the list of matching message(s)
+          for(k = 0; k < messageThread.length; k++){
+            if(!trial){
+              // Gather the email components
+              var sender = messageThread[k].getFrom()
+              var subject = messageThread[k].getSubject().replace(/\s+/g,' ')
+              var original = messageThread[k].getRawContent()
+              var postscript = 'The original message is attached to keep its format intact.\n\nNOTE:\nIn case when viewing the attached message is clipped on its pop-up window.\nDownload and open it on an local email client (e.g., Thunderbird).'
+              // Iterate the list of the matching message's recipient(s)
+              for(l = 0; l < PASS[i][1].length; l++){
+                // Debug to verify the job between the Inbox and Sent are in sync
+                if(DEBUG){
+                  console.warn('       DEBUG: ' + job + ' ### [Inbox] ### [Recipients No: ' + (l + 1) + '] ### [Forwarding & Deleting: \'' + subject.slice(0,25) + '...\']')
+                }
+                // Forward the matching message from Inbox to its recipient(s) as an attachment to keep its format intact
+                if(ALIAS[0]){
+                  GmailApp.sendEmail(PASS[i][1][l], subject, postscript, {from: GmailApp.getAliases()[ALIAS[1]], name: sender, replyTo: sender, attachments: [Utilities.newBlob(original, "message/rfc822", (subject + '.eml'))]})
+                }
+                else{
+                  GmailApp.sendEmail(PASS[i][1][l], subject, postscript, {name: sender, replyTo: sender, attachments: [Utilities.newBlob(original, "message/rfc822", (subject + '.eml'))]})
+                }
+                Utilities.sleep(1000 * 60 * PAUSE)
+              }
+              // Delete the matching message permanently from Inbox
+              do{
+                try{
+                  var retry = false
+                  Gmail.Users.Messages.remove('me', messageThread[k].getId())
+                }
+                // Keep retrying to delete the matching message permanently if the execution request fails on the Google service
+                catch(suppress){
+                  var retry = true
+                  if(DEBUG){
+                    console.warn('       DEBUG: ' + job + ' ### [Inbox] ### [Total Recipients: ' + PASS[i][1].length + '] ### [       Retry Deleting: \'' + subject.slice(0,25) + '...\']')
+                  }
+                }
+                Utilities.sleep(1000 * 60 * PAUSE)
+              }
+              while(retry)
+              // Proceed to perform deletion in Sent
+              var inSent = GmailApp.search('in:sent ' + PASS[i][0], 0, THREADS)
             }
-            Utilities.sleep(1000 * 60 * PAUSE)
-            // Delete the forwarded message from Sent permanently
-            var sent = GmailApp.search('in:sent ' + PASS[i][0], 0, THREADS)[0].getMessages()
-            Gmail.Users.Messages.remove('me', sent[0].getId())
-            // Debug to verify the job between the Inbox and Sent are in sequential sync
-            if(DEBUG){
-              console.warn('       DEBUG: ' + job + ' ### [ Sent] ### [Found: ' + sent.length + ' message(s)] ### [             Deleting: 1 of ' + sent.length + ' message(s)] ### [Subject: \'' + sent[0].getSubject() + '\']')
+            // Trial mode
+            else{
+              console.warn('DEBUG[TRIAL]: ' + job + ' ### [Inbox] ### [              Message: \'' + subject.slice(0,25) + '...\']')
             }
-          }
-          // Trial mode
-          else{
-            console.warn('DEBUG[TRIAL]: ' + job + ' ### [Inbox] ### [Found: ' + threads.length + ' message(s)] ### [Message: ' + (j + 1) + ' of ' + threads.length + '] ### [Subject: \'' + inbox[0].getSubject() + '\']')
+            // Count the matching message(s) per job
+            messages++
           }
         }
         if(!trial){
+          // Iterate the list of matching thread(s)
+          for(j = 0; j < inSent.length; j++){
+            var sentThread = inSent[j].getMessages()
+            // Iterate the list of matching message(s)
+            for(k = 0; k < sentThread.length; k++){
+              var subject = sentThread[k].getSubject().replace(/\s+/g,' ')
+              // Debug to verify the job between the Inbox and Sent are in sync
+              if(DEBUG){
+                console.warn('       DEBUG: ' + job + ' ### [ Sent] ### [Recipients No: ' + (k + 1) + '] ### [             Deleting: \'' + subject.slice(0,25) + '...\']')
+              }
+              // Delete the forwarded message from Sent permanently
+              do{
+                try{
+                  var retry = false
+                  Gmail.Users.Messages.remove('me', sentThread[k].getId())
+                }
+                // Keep retrying to delete the matching message permanently if the execution request fails on the Google service
+                catch(suppress){
+                  var retry = true
+                  if(DEBUG){
+                    console.warn('       DEBUG: ' + job + ' ### [ Sent] ### [Recipients No: ' + (k + 1) + '] ### [       Retry Deleting: \'' + subject.slice(0,25) + '...\']')
+                  }
+                }
+                Utilities.sleep(1000 * 60 * PAUSE)
+              }
+              while(retry)
+            }
+          }
           console.info('FORWARDED_TO: ' + job + ' ' + PASS[(i)][1].join(', '))
-          console.info('        DONE: ' + job + ' There are ' + threads.length + ' message(s) are forwarded then permanently deleted')
+          console.info('        DONE: ' + job + ' There are ' + messages + ' message(s) are forwarded then permanently deleted')
         }
         // Trial mode
         else{
-          console.info('        DONE: ' + job + ' There are ' + threads.length + ' matched message(s)')
+          console.info('        DONE: ' + job + ' There are ' + messages + ' matched message(s)')
         }
-        if(threads.length === THREADS){
-          count.push(threads.length)
+        if(inInbox.length === THREADS){
+          pages.push(inInbox.length)
         }
         else{
-          count.push(true)
+          pages.push(true)
         }
       }
     }
     // Set a paging trigger when the number of messages reaches the limit
-    if(count.includes(THREADS)){
+    if(pages.includes(THREADS)){
       var paged = 0
       // Count every paged job
-      for(var i = 0; i < count.length; i++){
-        if(count[i] === THREADS){
+      for(i = 0; i < pages.length; i++){
+        if(pages[i] === THREADS){
           paged++
         }
       }
@@ -282,7 +384,7 @@ function gmailAutoForwarder(paging, trial){
         unsetTrigger('forwarderPager')
       }
       // Output appeared after every message was filtered
-      if(count.includes(true)){
+      if(pages.includes(true)){
         if(!trial){
           console.info('JOB_FINISHED: All messages are forwarded')
         }
